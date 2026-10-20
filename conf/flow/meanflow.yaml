@@ -1,0 +1,16 @@
+# The MeanFlow objective (flow.MeanFlow): the network predicts the average velocity over [t, s], so the mean sampler
+# jumps from noise to a chunk in one network evaluation. Train with flow=meanflow sampler=mean train.warmup_steps=5000
+# (a train.* key, set by experiment=meanflow) and evaluate with sampler=mean. The defaults, MeanFlow's ImageNet pairs,
+# share and adaptive weight, are the best found on Push-T with that warm-up (see the README's MeanFlow section).
+defaults:
+  - path: linear
+  - pairs: imf            # the (t, s) distribution: imf | mf (conf/flow/pairs)
+  - _self_
+
+_target_: flow.MeanFlow
+flow_matching_share: 0.75 # share of rows with s = t (flow matching); 1 - the papers' ratio of r != t
+tangent: conditional      # conditional (MeanFlow: the conditional velocity) | predicted (improved MeanFlow:
+                          # the network's own u_bar(x, t, t))
+adaptive_power: 1.0       # p of the adaptive weight (L + eps)^-p on each chunk's gradient; 0: the plain squared error
+adaptive_eps: 1.0e-3
+reduction: sum            # sum | example_mean, as for flow matching

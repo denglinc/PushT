@@ -1,0 +1,24 @@
+# @package _global_
+# The flow matching objective itself, on AdamW with weight decay 0.01, the optimizer the study ran on (3 seeds per
+# arm; late success decides):
+#   uv run train.py -m experiment=flow_matching                         # path x prediction, 18 runs
+#   uv run train.py -m experiment=flow_matching 'flow/path=linear,gvp' flow.recipe=data_output_velocity_loss \
+#       'flow.time.support=[0.0,0.99]'      # a data output scored as a velocity, 6 runs (SDE: sampler.sde_end=0.99)
+#   uv run train.py -m experiment=flow_matching flow/path=linear flow.recipe=velocity_mse flow/time=logit_normal \
+#       'flow.time.mean=-0.5,0.0,0.5'                                   # flow-time distribution, 9 runs
+#   uv run train.py -m experiment=flow_matching flow/path=linear flow.recipe=velocity_mse \
+#       flow.reduction=example_mean                                     # loss reduction, 3 runs
+# During the study a scaled score was sampled from t = 0.001 (the start's default then; 0.05 since), so its training
+# curves logged that start; pass sampler.start_time=0.001 to log them alike.
+# Samplers need no retraining; score every run under each (Heun skips data predictions), e.g.
+#   uv run evaluation.py -m runs=runs/flow_matching split=selection episodes=500 sampler.solver=sde \
+#       'sampler.sde_eta=0,0.03,0.1,0.3,1.0'
+name: flow_matching
+train:
+  optimizer: adamw
+hydra:
+  sweeper:
+    params:
+      flow/path: linear,gvp
+      flow.recipe: velocity_mse,data_mse,scaled_score_mse
+      seed: range(710,713)

@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+wandb/
+.vscode/
+.idea/
+.DS_Store
+.ruff_cache/
+.pytest_cache/
+
+# Data and runs
+/data/
+/runs/
+*.zip
+
+# Documentation build
+/docs/_build/

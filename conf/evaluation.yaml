@@ -1,0 +1,32 @@
+# Score finished runs again without retraining (evaluation.py): other samplers, the held-out env seeds, other E.
+#   uv run evaluation.py runs=runs/default                                # held-out success of every run below
+#   uv run evaluation.py runs=runs/default sampler.solver=heun sampler.nfe=4 split=selection
+#   uv run evaluation.py -m runs=runs/default 'sampler.nfe=1,2,4,8,16' latency=true
+#   uv run evaluation.py runs=runs/meanflow sampler=mean            # MeanFlow's one step (MeanFlow runs only)
+# The sampler below replaces each run's own (recorded alongside); set guidance (sampler.cfg_scale) explicitly.
+defaults:
+  - sampler: default
+  - _self_
+  - override hydra/job_logging: none
+
+runs: ???                # a run directory, or a directory above runs: every finished run below it is scored
+weights: ema0.999        # raw | ema<decay>
+split: heldout           # heldout: env seeds 10000.. | selection: env seeds 0.. (the ones training evaluated)
+episodes: 1000
+exec_horizons: null      # list of E; null: each run's eval.exec_horizon
+latency: false           # also time batch-1 queries: evaluate/latency_ms, the median per query;
+                         # refuses to run while another process computes on the GPU
+wandb_project: pusht
+wandb_mode: ${oc.env:WANDB_MODE,online}  # online | offline | disabled; one run per scored run (job_type evaluate)
+
+hydra:
+  run:
+    dir: ${runs}/evaluations/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${runs}/evaluations/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: false
+    config:
+      override_dirname:  # names the evaluation's W&B runs
+        exclude_keys: [runs, wandb_project, wandb_mode]

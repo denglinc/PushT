@@ -1,0 +1,10 @@
+# @package _global_
+# A one-minute end-to-end check of one configuration: train briefly, evaluate a few episodes, log every module.
+#   uv run train.py experiment=smoke flow.recipe=data_mse
+name: smoke
+train:
+  steps: 2000
+eval:
+  interval: 1000
+  episodes: 20
+  num_late: 1

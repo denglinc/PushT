@@ -1,0 +1,25 @@
+# @package _global_
+# MeanFlow against flow matching on fresh training seeds, the confirmation of the README's MeanFlow section (6 runs
+# each; scored on the held-out env seeds without retraining). MeanFlow trains with 5000 warm-up steps; the flow
+# matching control is the default configuration, without them:
+#   uv run train.py -m experiment=meanflow                                                     # MeanFlow
+#   uv run train.py -m experiment=meanflow flow=default flow.recipe=velocity_mse sampler=default \
+#       train.warmup_steps=0                                                                   # flow matching
+#   uv run train.py -m experiment=meanflow flow=default flow.recipe=velocity_mse sampler=default   # FM + warm-up
+#   uv run evaluation.py -m runs=runs/meanflow sampler=mean 'sampler.nfe=1,2'      # MeanFlow (FM runs skipped)
+#   uv run evaluation.py -m runs=runs/meanflow 'sampler.nfe=1,2,4,10'              # Euler, both methods
+#   uv run evaluation.py runs=runs/meanflow sampler.nfe=2 sampler.grid=data_dense  # flow matching's best 2 NFE
+#   uv run evaluation.py runs=runs/meanflow sampler=mean 'exec_horizons=[1,2,8]'   # MeanFlow at other E
+defaults:
+  - override /flow: meanflow
+  - override /sampler: mean
+
+name: meanflow
+train:
+  warmup_steps: 5000     # MeanFlow's targets come from the network itself; warming up the rate helped (+0.03)
+  optimizer: adamw       # the recipe was tuned and confirmed with Adam (AdamW at weight decay 0), with warm-up
+  weight_decay: 0.0
+hydra:
+  sweeper:
+    params:
+      seed: range(600,606)

@@ -1,0 +1,2 @@
+# alpha = t, beta = 1 - t
+_target_: flow.LinearPath

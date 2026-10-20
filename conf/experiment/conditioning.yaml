@@ -1,0 +1,25 @@
+# @package _global_
+# How the goal and history reach the DiT, with and without condition dropout (24 runs), with the settings of its study
+# (phase 2): Adam, the velocity loss, padding hold, E = 8, decided on the raw weights.
+#   uv run train.py -m experiment=conditioning
+# Guidance needs no retraining; score the dropout runs at several scales (runs without dropout are skipped) with
+#   uv run evaluation.py -m runs=runs/conditioning split=selection episodes=200 weights=raw \
+#       'sampler.cfg_scale=1.1,1.25,1.5'
+name: conditioning
+data:
+  padding: hold
+flow:
+  recipe: velocity_mse   # the study trained velocity policies
+train:
+  optimizer: adamw       # at weight decay 0: Adam, the optimizer of the study
+  weight_decay: 0.0
+  ema_decays: [0.999, 0.9999]
+eval:
+  exec_horizon: 8
+  weights: [raw, ema0.999, ema0.9999]  # the study decided on the raw weights; the averages are scored alongside
+hydra:
+  sweeper:
+    params:
+      model.conditioning: adaln,concat,cross
+      model.cond_dropout: 0.0,0.1
+      seed: range(100,104)

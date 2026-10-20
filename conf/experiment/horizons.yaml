@@ -1,0 +1,20 @@
+# @package _global_
+# Prediction horizon H, scored at every E <= H at the late evaluations (16 runs), with the settings of its study
+# (phase 3b): Adam, the velocity loss, padding mask, decided on the raw weights.
+#   uv run train.py -m experiment=horizons      # then compare late/success_rate_E<e>_raw across the arms
+#   uv run train.py -m experiment=horizons data.obs_horizon=4   # the study's second history
+name: horizons
+flow:
+  recipe: velocity_mse   # the study trained velocity policies
+train:
+  optimizer: adamw       # at weight decay 0: Adam, the optimizer of the study
+  weight_decay: 0.0
+  ema_decays: [0.999, 0.9999]
+eval:
+  late_exec_horizons: [1, 2, 4, 8, 16, 32]
+  weights: [raw, ema0.999, ema0.9999]  # the study decided on the raw weights; the averages are scored alongside
+hydra:
+  sweeper:
+    params:
+      data.pred_horizon: 8,16,32,64
+      seed: range(300,304)

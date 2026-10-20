@@ -1,0 +1,13 @@
+# @package flow
+# MeanFlow's CIFAR-10 pairs (py-meanflow v1) with noise at t = 0: t ~ LN(0.6, 1.6), s = max(t, b), b ~ LN(4.0, 1.6)
+time:
+  _target_: flow.LogitNormalTime
+  mean: 0.6
+  std: 1.6
+  support: [0.0, 1.0]
+second_time:
+  _target_: flow.LogitNormalTime
+  mean: 4.0
+  std: 1.6
+  support: [0.0, 1.0]
+order: clip

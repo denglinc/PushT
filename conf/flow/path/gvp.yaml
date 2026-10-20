@@ -1,0 +1,2 @@
+# alpha = sin(pi t / 2), beta = cos(pi t / 2): variance preserving
+_target_: flow.GVPPath

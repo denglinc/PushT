@@ -1,0 +1,8 @@
+# MeanFlow's sampler (flow=meanflow only): each step adds (t_next - t) u_bar(x, t, t_next), one network evaluation;
+# one step from noise by default.
+defaults:
+  - default
+  - _self_
+
+solver: mean
+nfe: 1
