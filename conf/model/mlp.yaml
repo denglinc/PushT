@@ -1,0 +1,4 @@
+# ReLU MLP on the flattened observation, chunk and flow time (model.MLPPolicy).
+_target_: model.MLPPolicy
+hidden_dims: [256, 256, 256]
+cond_dropout: 0.0

@@ -1,0 +1,14 @@
+# How chunks are generated from noise (flow.Sampler). Sampling needs no retraining: evaluation.py scores saved
+# policies under any of these settings.
+_target_: flow.Sampler
+solver: euler            # euler (1 NFE per step) | heun (2 NFE per step) | sde (Euler-Maruyama on the flow plus
+                         # Langevin noise, any path and recipe) | mean (MeanFlow's average velocity per step, 1 NFE;
+                         # sampler=mean)
+nfe: 10                  # network evaluations per chunk, every solver stage and the SDE's final step included
+grid: uniform            # uniform t_i = i/n | data_dense t_i = 1 - (1 - i/n)^rho (smaller steps near the data)
+rho: 1.5
+start_time: null         # null: 0, or 0.05 for a scaled-score prediction (whose velocity divides by alpha; from
+                         # 0.001 its held-out success collapsed)
+sde_eta: 0.1             # g^2 = 2 eta alpha beta (2 eta t (1 - t) on the linear path); solver sde only
+sde_end: 0.999           # stochastic steps up to here, then one deterministic Euler step to t = 1
+cfg_scale: 1.0           # classifier-free guidance w; != 1 needs model.cond_dropout > 0

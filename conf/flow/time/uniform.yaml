@@ -1,0 +1,3 @@
+# t ~ U(support); one flow time per chunk
+_target_: flow.UniformTime
+support: [0.0, 1.0]

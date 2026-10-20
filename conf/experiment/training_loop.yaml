@@ -1,0 +1,19 @@
+# @package _global_
+# Learning rate, with a constant rate and with warm-up plus cosine decay (2 x 3 jobs x 3 seeds); raw and
+# averaged weights are both scored. A sweep is a product, so the coupled schedule settings are a second launch:
+#   uv run train.py -m experiment=training_loop
+#   uv run train.py -m experiment=training_loop train.schedule=cosine train.warmup_steps=1000
+name: training_loop
+flow:
+  recipe: velocity_mse   # the learning-rate study of phase 4 trained velocity policies
+train:
+  optimizer: adamw       # the learning-rate study was AdamW's
+  ema_decays: [0.999, 0.9999]
+eval:
+  weights: [raw, ema0.999, ema0.9999]
+hydra:
+  sweeper:
+    params:
+      train.lr: 1e-4,3e-4,1e-3
+      seed: 400            # seeds 400..402, trained together in each job
+      num_seeds: 3

@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+wandb/
+.vscode/
+.idea/
+.DS_Store
+.ruff_cache/
+.pytest_cache/
+.jax_cache/
+
+# Data and runs
+/data/
+/runs/
+*.zip

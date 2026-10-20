@@ -1,0 +1,40 @@
+[project]
+name = "pusht-jax"
+version = "0.1.0"
+description = "Research harness for flow matching action-chunk policies on Push-T, in JAX, managed with Hydra."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "flax==0.12.10",
+    # The env and numpy are pinned to PushT's (PyTorch) versions, so that evaluations compare policy for policy.
+    "gym-pusht==0.1.8",
+    "gymnasium==1.4.0",
+    "hydra-core>=1.3.7,<1.4",
+    # jaxlib >= 0.11.1 fixes two silent miscompiles on the RTX 50 series (sm_120); CUDA 13 needs driver >= 580.
+    "jax[cuda13]==0.11.2",
+    "numpy==2.4.6",
+    "optax==0.2.8",
+    "pymunk==6.11.1",
+    "setuptools>=80.9.0",
+    "shapely==2.2.0",
+    "wandb==0.23.1",
+    "zarr>=3.1.5",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "ruff>=0.14.10",
+]
+
+[tool.uv]
+# The CUDA 13 plugin ships Linux x86_64 wheels only.
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+# dict(...) keyword calls read like the keyword arguments they are passed as.
+extend-ignore = ["C408"]

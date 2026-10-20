@@ -1,0 +1,9 @@
+# @package flow
+# Improved MeanFlow's pairs (also MeanFlow's ImageNet ones) with noise at t = 0: two draws of LN(0.4, 1.0), sorted
+time:
+  _target_: flow.LogitNormalTime
+  mean: 0.4
+  std: 1.0
+  support: [0.0, 1.0]
+second_time: null
+order: sort

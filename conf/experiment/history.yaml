@@ -1,0 +1,24 @@
+# @package _global_
+# Observation history K, with and without the past actions; every E at the late evaluations (8 jobs x 4 seeds), with the
+# settings of its study (phase 3a): Adam, the velocity loss, padding hold, E = 8, decided on the raw weights.
+#   uv run train.py -m experiment=history
+name: history
+data:
+  padding: hold
+flow:
+  recipe: velocity_mse   # the study trained velocity policies
+train:
+  optimizer: adamw       # at weight decay 0: Adam, the optimizer of the study
+  weight_decay: 0.0
+  ema_decays: [0.999, 0.9999]
+eval:
+  exec_horizon: 8
+  late_exec_horizons: [1, 2, 4, 8, 16]
+  weights: [raw, ema0.999, ema0.9999]  # the study decided on the raw weights; the averages are scored alongside
+hydra:
+  sweeper:
+    params:
+      data.obs_horizon: 2,4,8,16
+      data.action_history: false,true
+      seed: 200            # seeds 200..203, trained together in each job
+      num_seeds: 4

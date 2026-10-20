@@ -1,0 +1,21 @@
+# @package _global_
+# AdamW's weight decay at the default learning rate, then Muon on the hidden weight matrices against AdamW (3 seeds
+# per arm; the averaged weights decide, the raw and slower-averaged ones are scored alongside):
+#   uv run train.py -m experiment=optimizer                                         # weight decay, 4 jobs x 3 seeds
+#   uv run train.py -m experiment=optimizer 'train.weight_decay=0.1,1.0'            # further, if 0.05 leads clearly
+#   uv run train.py -m experiment=optimizer train.optimizer=muon 'train.muon_lr=3e-4,1e-3,3e-3' \
+#       train.weight_decay=0.01                                                     # Muon, 3 jobs x 3 seeds
+name: optimizer
+flow:
+  recipe: velocity_mse   # the optimizers were compared on the velocity loss
+train:
+  optimizer: adamw       # the weight-decay grid is AdamW's; the Muon command overrides it
+  ema_decays: [0.999, 0.9999]
+eval:
+  weights: [ema0.999, ema0.9999, raw]
+hydra:
+  sweeper:
+    params:
+      train.weight_decay: 0.0,0.001,0.01,0.05
+      seed: 700            # seeds 700..702, trained together in each job
+      num_seeds: 3

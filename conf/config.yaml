@@ -1,0 +1,72 @@
+# One Push-T training job (train.py): num_seeds seeds trained together. Every key is an option; the defaults are the
+# best configuration found. Each seed's run directory is seed_<s>/ below the job's directory.
+#   uv run train.py                                  -> runs/default/<time>_seed_0/seed_0, W&B run base/seed_0
+#   uv run train.py flow/path=gvp seed=1             -> runs/default/<time>_seed_1/seed_1, W&B run flow/path=gvp/seed_1
+#   uv run train.py seed=600 num_seeds=6             -> runs/default/<time>_seed_600/seed_600 .. seed_605
+#   uv run train.py -m experiment=horizons           -> runs/horizons/<time>/<job>_seed_<seed>/seed_<s>, one job after
+#                                                       another
+defaults:
+  - model: dit
+  - flow: default
+  - sampler: default
+  - _self_
+  - experiment: null
+  - override hydra/job_logging: none
+
+name: default            # runs/<name>/... and the W&B group; the W&B run is <arm>/seed_<seed>, the arm being the
+                         # overrides other than the seed and the logging keys
+seed: 0                  # initialization, batch order, flow times and noise; evaluation has its own streams
+num_seeds: 1             # seeds seed, seed + 1, ..., trained together in one compiled program (jax.vmap); each seed
+                         # draws the same keys whatever num_seeds is
+data_dir: data           # where the training set is downloaded
+wandb_project: pusht_jax
+wandb_mode: ${oc.env:WANDB_MODE,online}  # online | offline (wandb sync uploads later) | disabled (log.csv only)
+
+data:
+  frame: block           # block | agent: whose current pose every feature and action is expressed in
+  obs_horizon: 2         # K >= 2 observed states t-K+1..t
+  pred_horizon: 16       # H predicted actions t..t+H-1
+  action_history: false  # each history frame also carries the set-point that produced it
+  padding: mask          # hold | mask | drop: future steps past an episode's end
+
+train:
+  optimizer: muon        # muon (torch's Muon on the hidden weight matrices, AdamW on the rest) | adamw
+  lr: 3.0e-4             # AdamW's (with muon: on the boundary matrices and the vectors)
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01     # decoupled, on weight matrices only (never biases, positions, null condition, time
+                         # frequencies); 0 is Adam
+  muon_lr: 3.0e-4        # Muon's lr, its update scaled to AdamW's RMS (match_rms_adamw); 3e-3 was unstable
+  schedule: constant     # constant | cosine (to 0 at the last step), after warmup_steps of linear warm-up; the same
+                         # factor scales lr and muon_lr
+  warmup_steps: 0
+  grad_clip: 0.0         # global gradient norm; 0 = off
+  batch_size: 128
+  steps: 80000
+  ema_decays: [0.999]    # moving averages of the weights, updated every step inside the compiled window
+
+eval:                    # periodic evaluation on the selection env seeds 0..episodes-1
+  interval: 10000        # eval/success_rate and eval/mean_reward, and every setting's (W&B section evaluation)
+  episodes: 200
+  exec_horizon: 4        # E <= H actions executed open-loop per query
+  late_exec_horizons: [] # extra E scored at the late evaluations (those > H are skipped)
+  num_late: 3            # late/: every setting pooled over the last num_late evaluations, the headline
+  weights: [ema0.999]    # raw | ema<decay> (one of train.ema_decays); the first gives the learning curve
+
+log:                     # intervals in optimizer steps (see logger.py)
+  train_interval: 100    # the train/ and meanflow/ rows; also the steps of one compiled window (a lax.scan), whose
+                         # means are read back only here; divides train.steps and eval.interval
+  print_interval: 1000   # console summary of the latest values, with the time left
+
+hydra:
+  run:
+    dir: runs/${name}/${now:%Y-%m-%d_%H-%M-%S}_seed_${seed}
+  sweep:
+    dir: runs/${name}/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}_seed_${seed}
+  job:
+    chdir: false
+    config:
+      override_dirname:  # the arm: these keys pick the run's directory or its logging, not its experiment
+        exclude_keys: [seed, num_seeds, name, experiment, data_dir, wandb_project, wandb_mode, log.train_interval,
+          log.print_interval]
