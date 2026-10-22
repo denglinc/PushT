@@ -359,6 +359,15 @@ def test_unsupported_combinations_fail_before_training():
     with pytest.raises(InstantiationException):
         train.check_config(config("flow=meanflow", "flow.flow_matching_share=1.5"))
     train.check_config(config("model=mlp", "flow/path=gvp", "flow/time=logit_normal"))
+    # A logit-normal time draws on the whole of [0, 1], so it takes no narrower support and no velocity-space loss.
+    with pytest.raises(InstantiationException):
+        train.check_config(
+            config("flow/time=logit_normal", "flow.time.support=[0.0,0.99]")
+        )
+    with pytest.raises(InstantiationException):
+        train.check_config(
+            config("flow/time=logit_normal", "flow.recipe=data_output_velocity_loss")
+        )
     control = config(
         "experiment=meanflow",
         "flow=default",

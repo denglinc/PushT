@@ -18,7 +18,7 @@ $$
 The network sees $(x, t)$ and predicts a velocity, the clean chunk or the scaled score (a Prediction); samplers map
 its output to a velocity and integrate. Nothing is clamped: denominators that vanish at an endpoint are kept away
 from it by rules checked when a training support or a time grid is built. Integration, adapters, losses and time
-quantiles run in float32; a sampler's grid coefficients are float64 floats computed on the host.
+draws run in float32; a sampler's grid coefficients are float64 floats computed on the host.
 
 Everything here is a pure function of its inputs: randomness enters as explicit keys (jax.random), so the losses and
 samplers run inside jit, scan and vmap unchanged.
@@ -52,8 +52,9 @@ Tangent = Literal["conditional", "predicted"]
 Reduction = Literal["sum", "example_mean"]
 
 HALF_PI = 0.5 * math.pi
-# Open quantile lattice u = (2k + 1) 2^-24, k < 2^23: exactly uniform in float32 and symmetric about 1/2.
-QUANTILE_BITS = 23
+# A velocity-space loss must not train at its prediction's singular time. A float32 draw can round onto a support end
+# that lies within 2^-23 of that time, so such an end counts as reaching it.
+SINGULAR_MARGIN = 2.0**-23
 # A scaled-score prediction cannot be evaluated at t = 0 (its velocity divides by alpha); sampling starts here
 # from N(0, I), an approximation of p_t at this time, not its exact marginal. Near 0 the first step multiplies the
 # network's error by dt D / alpha (about 100 for 10 steps from 0.001), so the start stays clear of it: on Push-T
@@ -66,15 +67,6 @@ def _sin(t: jax.Array | np.ndarray) -> jax.Array | np.ndarray:
     Evaluates $\sin t$: traced in the graph for an array of flow times, in float64 on the host for a grid time.
     """
     return jnp.sin(t) if isinstance(t, jax.Array) else np.sin(t)
-
-
-def _sigmoid(x: jax.Array) -> jax.Array:
-    r"""
-    Evaluates $\mathrm{sigmoid}(x)$, rounding once on both sides of 0.
-    Note: XLA's $1 / (1 + e^{-x})$ returns exactly 1 in float32 for $x > 16.6$; $1 - \mathrm{sigmoid}(-x)$ holds below 1
-    up to $x = 17.3$, where a float64 sigmoid rounded to float32 does.
-    """
-    return jnp.where(x > 0, 1 - jax.nn.sigmoid(-x), jax.nn.sigmoid(x))
 
 
 class Coefficients(NamedTuple):
@@ -336,18 +328,19 @@ class GVPPath(ProbabilityPath):
 
 class TimeSampler(abc.ABC):
     r"""
-    A training distribution of flow times with CDF $F$, restricted to a support $[a, b]$ within $[0, 1]$.
-    Note: a draw is $t = F^{-1}\big(F(a) + (F(b) - F(a))\,\nu\big)$ with $\nu$ on an open lattice of quantiles, the
-    closed form of drawing from $F$ and redrawing until $t$ lies in the support. Nothing is clamped and nothing depends
-    on array values, so it runs inside jit. Draws are computed in float32, where the lattice is exact. Whether float32
-    could round a draw to 0 or 1 depends only on the two extreme quantiles, so that is checked once, here, with the
-    same function.
+    A training distribution of flow times, given by its inverse CDF $F^{-1}$ on a support $[t_{\min}, t_{\max}]$
+    within $[0, 1]$.
+    Note: a draw is $t = F^{-1}(u)$ with one uniform $u \in [0, 1)$ per example. Every distribution therefore draws
+    the same $u$ from the same key, so runs that differ only in it have their times coupled through $u$ (their noise
+    and batch order come from other keys). Nothing is clamped and nothing depends on array values, so it runs inside
+    jit. $u$ can be exactly 0, so a draw can equal $t_{\min}$: no regression target divides by a path coefficient, and
+    a velocity-space loss is kept off its singular time by the support rule of FlowMatching.
     """
 
     def __init__(self, *, support: tuple[float, float]) -> None:
         r"""
         Args:
-            - support: $(a, b)$ with $0 \le a < b \le 1$
+            - support: $(t_{\min}, t_{\max})$ with $0 \le t_{\min} < t_{\max} \le 1$
         """
         low, high = (float(s) for s in support)
         if not 0.0 <= low < high <= 1.0:
@@ -355,59 +348,16 @@ class TimeSampler(abc.ABC):
                 f"The time support must satisfy 0 <= a < b <= 1, got {support}."
             )
         self.support = (low, high)
-        self.mass = (self.cdf(low), self.cdf(high))
-        if not self.mass[1] > self.mass[0]:
-            raise ValueError(f"The time support {support} carries no probability.")
-        # Eagerly, even when the sampler is built inside a trace.
-        with jax.ensure_compile_time_eval():
-            extremes = jnp.array([[0], [2**QUANTILE_BITS - 1]])
-            first, last = np.asarray(self._draw(extremes)).ravel().tolist()
-        if not (first > 0.0 and last < 1.0):
-            raise ValueError(
-                f"{type(self).__name__} on {support} reaches t = {first:g} .. {last:g}; float32 would round "
-                "draws to an endpoint."
-            )
 
     @abc.abstractmethod
-    def cdf(self, t: float) -> float:
-        """
-        Evaluates the CDF $F(t)$ on the host.
-        Args:
-            - t: a flow time in $[0, 1]$
-        Returns:
-            - $F(t)$, in float64
-        """
-
-    @abc.abstractmethod
-    def icdf(self, p: jax.Array) -> jax.Array:
-        """
-        Evaluates the inverse CDF $F^{-1}(p)$.
-        Args:
-            - p: probabilities, float32, any shape
-        Returns:
-            - flow times, float32, the same shape
-        """
-
-    def _restrict(self, u: jax.Array) -> jax.Array:
+    def icdf(self, u: jax.Array) -> jax.Array:
         r"""
-        Maps quantiles of the whole distribution to quantiles inside the support.
+        Evaluates the inverse CDF.
         Args:
-            - u: quantiles $\nu$ in $(0, 1)$, float32
+            - u: uniform draws in $[0, 1)$, 0 included, float32, any shape
         Returns:
-            - $F(a) + (F(b) - F(a))\,\nu$
+            - flow times in $[t_{\min}, t_{\max}]$, float32, the same shape
         """
-        return self.mass[0] + (self.mass[1] - self.mass[0]) * u
-
-    def _draw(self, k: jax.Array) -> jax.Array:
-        """
-        Maps lattice indices to flow times.
-        Args:
-            - k: lattice indices in $[0, 2^{23})$, integer, any shape
-        Returns:
-            - flow times in float32, the same shape
-        """
-        u = (2 * k + 1).astype(jnp.float32) * 2.0 ** -(QUANTILE_BITS + 1)
-        return self.icdf(self._restrict(u))
 
     def sample(self, key: jax.Array, n: int) -> jax.Array:
         """
@@ -418,31 +368,26 @@ class TimeSampler(abc.ABC):
         Returns:
             - $t$: flow times in float32, shape (n, 1)
         """
-        return self._draw(jax.random.randint(key, (n, 1), 0, 2**QUANTILE_BITS))
+        return self.icdf(jax.random.uniform(key, (n, 1), jnp.float32))
 
 
 class UniformTime(TimeSampler):
     r"""
-    $t \sim \mathrm{Unif}(a, b)$.
+    $t \sim \mathrm{Unif}(t_{\min}, t_{\max})$.
     """
 
-    def cdf(self, t: float) -> float:
+    def icdf(self, u: jax.Array) -> jax.Array:
+        r"""
+        Evaluates $F^{-1}(u) = t_{\min} + (t_{\max} - t_{\min})\,u$.
         """
-        Evaluates $F(t) = t$.
-        """
-        return t
-
-    def icdf(self, p: jax.Array) -> jax.Array:
-        """
-        Evaluates $F^{-1}(p) = p$.
-        """
-        return p
+        low, high = self.support
+        return low + (high - low) * u
 
 
 class LogitNormalTime(TimeSampler):
     r"""
-    $\mathrm{logit}\,t \sim \mathcal N(\mu, \varsigma^2)$, restricted to the support; a positive mean puts
-    more times near the data.
+    $\mathrm{logit}\,t \sim \mathcal N(\mu, \varsigma^2)$ on the whole of $[0, 1]$; a positive mean puts more times near
+    the data.
     """
 
     def __init__(
@@ -452,27 +397,23 @@ class LogitNormalTime(TimeSampler):
         Args:
             - mean: mean of $\mathrm{logit}\,t$
             - std: standard deviation of $\mathrm{logit}\,t$, positive
-            - support: $(a, b)$ with $0 \le a < b \le 1$
+            - support: $(0, 1)$ only; a uniform time takes a narrower support
         """
         if not std > 0:
             raise ValueError(f"std must be positive, got {std}.")
+        if tuple(float(s) for s in support) != (0.0, 1.0):
+            raise ValueError(
+                f"LogitNormalTime draws on the whole of [0, 1], got the support {support}; restrict a uniform time "
+                "instead."
+            )
         self.mean, self.std = float(mean), float(std)
         super().__init__(support=support)
 
-    def cdf(self, t: float) -> float:
+    def icdf(self, u: jax.Array) -> jax.Array:
         r"""
-        Evaluates $F(t) = \Phi\big((\mathrm{logit}\,t - \mu)/\varsigma\big)$.
+        Evaluates $F^{-1}(u) = \mathrm{sigmoid}\big(\mu + \varsigma\,\Phi^{-1}(u)\big)$; $u = 0$ gives $t = 0$.
         """
-        if t in (0.0, 1.0):
-            return t
-        y = (math.log(t) - math.log1p(-t) - self.mean) / self.std
-        return 0.5 * math.erfc(-y / math.sqrt(2.0))
-
-    def icdf(self, p: jax.Array) -> jax.Array:
-        r"""
-        Evaluates $F^{-1}(p) = \mathrm{sigmoid}\big(\mu + \varsigma\,\Phi^{-1}(p)\big)$.
-        """
-        return _sigmoid(self.mean + self.std * ndtri(p))
+        return jax.nn.sigmoid(self.mean + self.std * ndtri(u))
 
 
 class Prediction(abc.ABC):
@@ -628,10 +569,10 @@ class FlowMatching:
         singular = self.prediction.singular_time
         if self.recipe.velocity_loss and singular is not None:
             low, high = time.support
-            if low <= singular <= high:
+            if low - SINGULAR_MARGIN <= singular <= high + SINGULAR_MARGIN:
                 raise ValueError(
-                    f"Recipe {recipe!r} divides by zero at t = {singular}; restrict the time support to exclude "
-                    "it (e.g. [0.001, 0.999])."
+                    f"Recipe {recipe!r} divides by zero at t = {singular}; draw the times uniformly on a support "
+                    "that excludes it (e.g. flow/time=uniform 'flow.time.support=[0.0,0.99]')."
                 )
 
     def per_example(self, error: jax.Array, weight: jax.Array) -> jax.Array:
@@ -819,9 +760,9 @@ class MeanFlow(FlowMatching):
     def sample_times(self, key: jax.Array, n: int) -> tuple[jax.Array, jax.Array]:
         r"""
         Draws one time pair per example (see the class note).
-        Note: the number of flow matching rows, $\mathrm{round}(\text{share}\cdot n)$, is fixed and the draws come from
-        the quantile lattice, so this runs inside jit; batches are shuffled, so the rows by index are a fixed share of
-        random examples.
+        Note: the number of flow matching rows, $\mathrm{round}(\text{share}\cdot n)$, is fixed and the draws involve no
+        control flow on array values, so this runs inside jit; batches are shuffled, so the rows by index are a fixed
+        share of random examples.
         Args:
             - key: a PRNG key, split for the two draws
             - n: number of pairs

@@ -1,4 +1,4 @@
-# logit(t) ~ N(mean, std^2), restricted to the support; one flow time per chunk
+# logit(t) ~ N(mean, std^2) on all of [0, 1] (the support must stay [0, 1]); one flow time per chunk
 _target_: flow.LogitNormalTime
 mean: 0.0
 std: 1.0

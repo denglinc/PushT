@@ -26,7 +26,8 @@ uv run train.py seed=600 num_seeds=6    # six seeds at once, one run each
 The first run downloads the training set (31 MB) to `data/`. The default trains for 80,000 steps, about 8 minutes on
 an RTX 5080 plus a few minutes of evaluation: every 10,000 steps it plays 200 episodes per seed and prints the success
 rate. The run lands in `runs/default/<time>_seed_0/seed_0/`, with `log.csv` and `checkpoint.pkl`. A seed reruns bit
-for bit (deterministic GPU kernels; `XLA_FLAGS=--xla_gpu_deterministic_ops=false` trains 11% to 18% faster).
+for bit (deterministic GPU kernels; `XLA_FLAGS=--xla_gpu_deterministic_ops=false` trains 11% to 18% faster). Runs
+from commit 8fc01b1 or earlier drew their flow times differently and repeat bit for bit only with that code.
 
 Then score finished runs on 1,000 held-out episodes, under any sampler, without retraining:
 

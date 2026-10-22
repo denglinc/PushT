@@ -119,7 +119,9 @@ class FlowMatchingPolicy(nnx.Module):
     """
     Predicts relative action chunks with a flow matching objective; subclasses supply the network.
     Note: compute_loss's key also draws condition dropout: a share cond_dropout of each batch sees the learned null
-    condition instead of its own, which trains the unconditional prediction that guidance needs.
+    condition instead of its own, which trains the unconditional prediction that guidance needs. compute_loss splits
+    the dropout key off at every cond_dropout, 0 included, so cond_dropout changes no other random draw: runs that
+    differ only in it share a seed's flow times and noise.
     """
 
     def __init__(

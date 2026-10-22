@@ -6,6 +6,6 @@ defaults:
 
 _target_: flow.FlowMatching
 recipe: scaled_score_mse # scaled_score_mse (sampled from t = 0.05) | velocity_mse | data_output_velocity_loss
-                         # (needs time.support to exclude t = 1) | data_mse
+                         # (needs flow/time=uniform with a support that excludes t = 1) | data_mse
 reduction: sum           # sum: squared error summed over a chunk's valid steps, averaged over chunks
                          # | example_mean: averaged over each chunk's valid coordinates first
