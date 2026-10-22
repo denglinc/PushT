@@ -139,21 +139,27 @@ def test_conditional_velocity_is_the_path_derivative():
             assert torch.allclose(fd, path(tt).velocity(z, eps), atol=1e-7)
 
 
-def test_uniform_time_lattice():
+def test_uniform_time_draws():
     """
-    Uniform flow times lie strictly inside (0, 1) on the odd multiples of 2^-24.
+    Uniform flow times are float32 draws on the support: t_min itself when u = 0, and never t = 1 on [0, 1].
     """
     t = UniformTime(support=(0.0, 1.0)).sample(1_000_000, torch.device("cpu"))
     assert t.dtype == torch.float32 and t.shape == (1_000_000, 1)
-    assert 0.0 < t.min() and t.max() < 1.0
-    # Quantiles (2k + 1) 2^-24: every draw is an odd multiple of 2^-24.
-    assert torch.all((t.double() * 2**24) % 2 == 1)
+    assert 0.0 <= t.min() and t.max() < 1.0
+    # On the CPU, torch.rand returns multiples of 2^-24.
+    assert torch.all((t.double() * 2**24) % 1 == 0)
     assert abs(t.mean().item() - 0.5) < 2e-3
+    short = UniformTime(support=(0.0, 0.99))
+    assert short.sample(1_000_000, torch.device("cpu")).max() <= 0.99
+    # The smallest and largest values of torch.rand.
+    edges = torch.tensor([[0.0], [1.0 - 2**-24]])
+    assert short.icdf(edges)[0].item() == 0.0 and short.icdf(edges)[1].item() <= 0.99
+    assert UniformTime(support=(0.2, 0.3)).icdf(edges)[0].item() == np.float32(0.2)
 
 
 def test_time_sampler_validation():
     """
-    Invalid supports and distributions that reach a float32 endpoint are refused.
+    Invalid supports and parameters are refused, and a logit-normal draws on the whole of [0, 1] only.
     """
     with pytest.raises(ValueError):
         UniformTime(support=(0.5, 0.5))
@@ -161,33 +167,131 @@ def test_time_sampler_validation():
         UniformTime(support=(-0.1, 1.0))
     with pytest.raises(ValueError):
         LogitNormalTime(mean=0.0, std=0.0, support=(0.0, 1.0))
-    # The extreme quantile is 5.29 standard deviations out; past logit 17.33 a draw rounds to 1 in float32.
-    with pytest.raises(ValueError):
-        LogitNormalTime(mean=0.0, std=3.3, support=(0.0, 1.0))
-    LogitNormalTime(mean=0.0, std=3.25, support=(0.0, 1.0))
-    LogitNormalTime(mean=0.0, std=3.3, support=(0.0, 0.99))
+    for support in [(0.0, 0.99), (0.001, 1.0)]:
+        with pytest.raises(ValueError):
+            LogitNormalTime(mean=0.0, std=1.0, support=support)
+    # Configs and checkpoints store the support as a list.
+    LogitNormalTime(mean=4.0, std=1.6, support=[0.0, 1.0])
+    LogitNormalTime(mean=0.0, std=3.3, support=(0.0, 1.0))
+
+
+def logit_normal_cdf(mean: float, std: float):
+    """The CDF Phi((logit t - mean) / std) of a logit-normal law, in float64."""
+    return lambda t: torch.special.ndtr((torch.logit(t) - mean) / std)
 
 
 @pytest.mark.parametrize(
-    "time",
+    "time, cdf",
     [
-        UniformTime(support=(0.001, 0.999)),
-        UniformTime(support=(0.2, 0.3)),
-        LogitNormalTime(mean=0.0, std=1.0, support=(0.0, 1.0)),
-        LogitNormalTime(mean=0.0, std=1.0, support=(0.3, 0.9)),
-        LogitNormalTime(mean=1.0, std=0.5, support=(0.001, 0.6)),
+        (UniformTime(support=(0.0, 1.0)), lambda t: t),
+        (UniformTime(support=(0.001, 0.999)), lambda t: (t - 0.001) / 0.998),
+        (UniformTime(support=(0.2, 0.3)), lambda t: (t - 0.2) / 0.1),
+        (
+            LogitNormalTime(mean=0.0, std=1.0, support=(0.0, 1.0)),
+            logit_normal_cdf(0.0, 1.0),
+        ),
+        (
+            LogitNormalTime(mean=0.4, std=1.0, support=(0.0, 1.0)),
+            logit_normal_cdf(0.4, 1.0),
+        ),
+        (
+            LogitNormalTime(mean=0.6, std=1.6, support=(0.0, 1.0)),
+            logit_normal_cdf(0.6, 1.6),
+        ),
+        (
+            LogitNormalTime(mean=4.0, std=1.6, support=(0.0, 1.0)),
+            logit_normal_cdf(4.0, 1.6),
+        ),
     ],
+    ids=["u01", "u001_0999", "u02_03", "ln0_1", "ln04_1", "ln06_16", "ln4_16"],
 )
-def test_truncated_draws_follow_the_conditional_cdf(time):
-    """Kolmogorov-Smirnov against F_S(t) = (F(t) - F(a)) / (F(b) - F(a)): sampling from F, redrawing outside S."""
+def test_draws_follow_the_law(time, cdf):
+    """Kolmogorov-Smirnov against the law's CDF on its support."""
     n = 200_000
+    torch.manual_seed(0)
     t = torch.sort(time.sample(n, torch.device("cpu")).flatten().double()).values
     low, high = time.support
     assert low <= t[0] and t[-1] <= high
-    cdf = torch.tensor([time.cdf(v) for v in t.tolist()], dtype=torch.float64)
-    conditional = (cdf - time.mass[0]) / (time.mass[1] - time.mass[0])
+    law = cdf(t)
     empirical = torch.arange(1, n + 1, dtype=torch.float64) / n
-    assert (conditional - empirical).abs().max() < 1.95 / math.sqrt(n)
+    assert torch.maximum(
+        empirical - law, law - (empirical - 1 / n)
+    ).max() < 1.95 / math.sqrt(n)
+
+
+TIME_SAMPLERS = [
+    UniformTime(support=(0.0, 1.0)),
+    UniformTime(support=(0.0, 0.99)),
+    LogitNormalTime(mean=0.4, std=1.0, support=(0.0, 1.0)),
+    LogitNormalTime(mean=4.0, std=1.6, support=(0.0, 1.0)),
+]
+
+
+def test_time_draws_use_one_uniform_per_example():
+    """
+    Every sampler draws t = icdf(u) from one torch.rand per example, so it leaves the generator where torch.rand
+    does and a sweep over time laws keeps a seed's other draws.
+    """
+    for time in TIME_SAMPLERS:
+        torch.manual_seed(3)
+        t = time.sample(100, torch.device("cpu"))
+        state = torch.get_rng_state()
+        torch.manual_seed(3)
+        u = torch.rand(100, 1)
+        assert torch.equal(t, time.icdf(u)) and torch.equal(
+            state, torch.get_rng_state()
+        )
+
+
+def test_time_extremes_are_finite():
+    """
+    The extreme uniforms map into [0, 1] without NaN; a logit-normal sends u = 0 to t = 0 exactly.
+    """
+    edges = torch.tensor([[0.0], [1.0 - 2**-24]])
+    for time in TIME_SAMPLERS:
+        t = time.icdf(edges)
+        assert torch.isfinite(t).all() and 0.0 <= t.min() and t.max() <= 1.0
+    assert TIME_SAMPLERS[2].icdf(torch.zeros(1, 1)).item() == 0.0
+
+
+def linear_net(
+    x: torch.Tensor, t: torch.Tensor, s: torch.Tensor | None = None
+) -> torch.Tensor:
+    """A fixed affine network of (x, t[, s]) for the endpoint tests; s omitted is t."""
+    s = t if s is None else s
+    return 0.5 * x + (0.3 * t - 0.2 * s + 0.1)[:, :, None]
+
+
+@pytest.mark.parametrize("path", PATHS, ids=["linear", "gvp"])
+def test_losses_are_finite_at_the_ends(path):
+    """
+    A draw can land on t = 0 (u = 0) or round to t = 1: every loss that may train there is finite. The velocity-space
+    loss is finite at the end of its shortened support.
+    """
+    z, weight = torch.randn(4, 2, 2), torch.ones(4, 2)
+    ends = torch.tensor([[0.0], [1.0], [0.0], [1.0]])
+    for recipe in ["velocity_mse", "data_mse", "scaled_score_mse"]:
+        flow = FlowMatching(
+            path=path,
+            time=UniformTime(support=(0.0, 1.0)),
+            recipe=recipe,
+            reduction="sum",
+        )
+        assert math.isfinite(flow.loss(linear_net, z, weight, flow_time=ends)[0].item())
+    for tangent in ["conditional", "predicted"]:
+        flow = meanflow(path=path, tangent=tangent)
+        loss, metrics = flow.loss(
+            linear_net, z, weight, flow_time=ends, end_time=torch.ones(4, 1)
+        )
+        assert math.isfinite(loss.item()) and all(
+            math.isfinite(v.item()) for v in metrics.values()
+        )
+    short = UniformTime(support=(0.0, 0.99))
+    flow = FlowMatching(
+        path=path, time=short, recipe="data_output_velocity_loss", reduction="sum"
+    )
+    t_max = short.icdf(torch.full((4, 1), 1.0 - 2**-24))
+    assert math.isfinite(flow.loss(linear_net, z, weight, flow_time=t_max)[0].item())
 
 
 def replicate_draws(flow: FlowMatching, z: torch.Tensor, seed: int):
@@ -254,13 +358,26 @@ def test_velocity_loss_needs_a_support_away_from_the_singularity():
     """
     A velocity-space loss on a data prediction needs a support that excludes t = 1.
     """
-    with pytest.raises(ValueError):
-        FlowMatching(
-            path=LinearPath(),
-            time=UniformTime(support=(0.0, 1.0)),
-            recipe="data_output_velocity_loss",
-            reduction="sum",
-        )
+    refused = [
+        UniformTime(support=(0.0, 1.0)),
+        LogitNormalTime(mean=0.0, std=1.0, support=(0.0, 1.0)),
+        # Below 1 in float64, but float32 draws on it round to t = 1.
+        UniformTime(support=(0.75, 1.0 - 2**-26)),
+    ]
+    for time in refused:
+        with pytest.raises(ValueError):
+            FlowMatching(
+                path=LinearPath(),
+                time=time,
+                recipe="data_output_velocity_loss",
+                reduction="sum",
+            )
+    FlowMatching(
+        path=LinearPath(),
+        time=UniformTime(support=(0.0, 0.99)),
+        recipe="data_output_velocity_loss",
+        reduction="sum",
+    )
 
 
 def test_time_grids():
@@ -482,6 +599,8 @@ def test_loss_is_graph_capturable(recipe, time):
     """
     The loss of every recipe and time sampler is captured in a CUDA graph without host syncs.
     """
+    if time == "logit_normal" and recipe == "data_output_velocity_loss":
+        pytest.skip("A logit-normal time draws on [0, 1], which this recipe refuses.")
     device = torch.device("cuda")
     support = (0.001, 0.999) if recipe == "data_output_velocity_loss" else (0.0, 1.0)
     sampler_time = (

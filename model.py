@@ -190,8 +190,10 @@ class FlowMatchingPolicy(nn.Module, metaclass=abc.ABCMeta):
             - condition, shape (bs, ...)
         """
         condition = self.encode_condition(obs, goal)
-        if self.training and self.cond_dropout > 0:
-            # torch.where, not masked assignment, so the dropout can live inside a CUDA graph.
+        if self.training:
+            # Drawn at every cond_dropout, 0 included (every example then keeps its condition), so runs that differ
+            # only in it share a seed's flow times, noise and batch order. The draw feeds torch.where, so the compiled
+            # loss keeps it, and torch.where, not masked assignment, lets the dropout live inside a CUDA graph.
             keep = torch.rand(obs.shape[0], device=obs.device) >= self.cond_dropout
             keep = keep.reshape(-1, *[1] * (condition.dim() - 1))
             condition = torch.where(keep, condition, self.null_condition(obs.shape[0]))

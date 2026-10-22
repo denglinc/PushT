@@ -82,41 +82,40 @@ _target_: flow.MyPath
 ## A flow-time distribution
 
 Subclass {py:class}`~flow.TimeSampler`, the distribution of $t$ in the loss (uniform in the notes'
-$\mathcal L_{\text{CFM}}$). {py:meth}`~flow.TimeSampler.cdf` runs on the host in float64 and only at construction;
-{py:meth}`~flow.TimeSampler.icdf` runs on tensors inside the captured step. {py:meth}`~flow.TimeSampler.sample`
-inverts the CDF on quantiles restricted to the support $[t_{\min}, t_{\max}]$, `flow.time.support`, so the draw needs
-neither clamping nor redrawing. [Drawing on a support](flow/training.md#drawing-on-a-support) derives it.
+$\mathcal L_{\text{CFM}}$), and give its inverse CDF. {py:meth}`~flow.TimeSampler.sample` applies
+{py:meth}`~flow.TimeSampler.icdf` to one `torch.rand` draw per example, inside the captured step, so every
+distribution uses the same random numbers and the draw needs neither clamping nor redrawing. A support
+$[t_{\min}, t_{\max}]$ narrower than $[0, 1]$ (`flow.time.support`) needs an inverse CDF of the law restricted to it:
+scaling the draw into the support is right for the uniform law only. [Drawing on a
+support](flow/training.md#drawing-on-a-support) derives it.
 
 ```python
 class MyTime(TimeSampler):
     def __init__(self, *, width: float, support: tuple[float, float]) -> None:
-        # Set before the base constructor evaluates cdf and icdf.
         self.width = float(width)
         super().__init__(support=support)
 
-    # On the host, in float64.
-    def cdf(self, t: float) -> float: ...
-
-    # On float64 tensors, inside the CUDA graph.
-    def icdf(self, p: torch.Tensor) -> torch.Tensor: ...
+    # On float32 uniforms u in [0, 1), 0 included, inside the CUDA graph.
+    def icdf(self, u: torch.Tensor) -> torch.Tensor: ...
 ```
 
 ```yaml
 # conf/flow/time/my.yaml
-# F(t) = ...; one flow time per chunk
+# F^-1(u) = ...; one flow time per chunk
 _target_: flow.MyTime
 width: 1.0
 support: [0.0, 1.0]
 ```
 
-- **Checks you get.** The constructor refuses a support outside $0 \le t_{\min} < t_{\max} \le 1$, a support without
-  probability, and a distribution whose extreme quantiles round to 0 or 1 in float32: nothing is clamped, so
-  denominators that vanish at an endpoint are kept away from it by this check. {py:class}`~flow.FlowMatching` refuses
-  a velocity-space loss whose support contains the prediction's singular time.
-- **Your responsibilities.** `icdf` takes and returns float64 tensors and must not branch on their values.
-- **Test.** Add instances to the parameters of `test_truncated_draws_follow_the_conditional_cdf` (a
-  Kolmogorov-Smirnov test against the truncated CDF) and a refused case to `test_time_sampler_validation`; on a GPU,
-  extend `test_loss_is_graph_capturable`.
+- **Checks you get.** The constructor refuses a support outside $0 \le t_{\min} < t_{\max} \le 1$. Nothing is
+  clamped: {py:class}`~flow.FlowMatching` keeps a velocity-space loss away from the prediction's singular time by
+  refusing a support that contains it or ends within $2^{-23}$ of it.
+- **Your responsibilities.** `icdf` takes and returns float32 tensors, maps $u = 0$ to a finite time (a draw can be
+  exactly 0), stays in the support and must not branch on tensor values. Refuse parameters you cannot draw exactly in
+  the constructor, as {py:class}`~flow.LogitNormalTime` refuses a support other than $[0, 1]$.
+- **Test.** Add a case with its exact CDF to the parameters of `test_draws_follow_the_law` (a Kolmogorov-Smirnov
+  test) and to `TIME_SAMPLERS` (one uniform per example, finite at the extreme uniforms), and a refused case to
+  `test_time_sampler_validation`; on a GPU, extend `test_loss_is_graph_capturable`.
 - **Docs.** {doc}`flow/training` (flow-time distributions: moving the training weight toward the noise hurt).
 
 ## A prediction and its recipe

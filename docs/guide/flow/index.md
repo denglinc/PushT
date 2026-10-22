@@ -371,7 +371,7 @@ so both conversions return $u_t^{\text{target}}(x)$ for every $t \in (0, 1)$. Th
 posterior means do. At $t = 0$ that is every $x$, since $p_0 = \mathcal N(0, I)$ is positive everywhere, with
 $\mathbb E[\epsilon \mid x] = x$ and $D_0(x) = \mathbb E[z]$. At $t = 1$ it is only where the data have a density, which
 a finite set of demonstrations does not. A network's output, in contrast, carries an error that does not vanish with the
-denominator, and the conversion multiplies that error by the unbounded gain $B_t$. The code therefore never evaluates a
+denominator, and the conversion multiplies that error by the unbounded gain $B_t$. The code therefore never converts a
 prediction at its singular time ([Numerics](#numerics)).
 
 ## Paths
@@ -472,7 +472,7 @@ subclasses; {py:class}`~flow.Recipe`, {py:class}`~flow.FlowMatching` and {py:cla
 | base class | defined by | implementations |
 | --- | --- | --- |
 | {py:class}`~flow.ProbabilityPath` | the noise schedulers $\alpha_t$, $\beta_t$ and their derivatives (and $\kappa_t$); returns {py:class}`~flow.Coefficients` | {py:class}`~flow.LinearPath`, {py:class}`~flow.GVPPath` |
-| {py:class}`~flow.TimeSampler` | a CDF and its inverse, restricted to a support | {py:class}`~flow.UniformTime`, {py:class}`~flow.LogitNormalTime` |
+| {py:class}`~flow.TimeSampler` | an inverse CDF on a support, applied to one uniform draw per example | {py:class}`~flow.UniformTime`, {py:class}`~flow.LogitNormalTime` |
 | {py:class}`~flow.Prediction` | a regression target, the map to the vector field, a singular time | {py:class}`~flow.VelocityPrediction`, {py:class}`~flow.DataPrediction`, {py:class}`~flow.ScaledScorePrediction` |
 | {py:class}`~flow.Recipe`, in `RECIPES` | a prediction and the space its loss compares in | `velocity_mse`, `data_mse`, `data_output_velocity_loss`, `scaled_score_mse` |
 | {py:class}`~flow.FlowMatching` | a path, a flow-time distribution, a recipe, a reduction; the loss | itself (flow matching), {py:class}`~flow.MeanFlow` |
@@ -523,15 +523,14 @@ places:
     approximate ones. {py:meth}`~flow.GVPPath.beta` therefore writes $\beta_t$ as $\sin\frac{\pi(1 - t)}{2}$: the
     float32 value of $\cos\frac{\pi}{2}$ is not 0. A path with a closed-form $\kappa_t$ overrides
     {py:meth}`~flow.ProbabilityPath.D`; otherwise it is computed from its definition.
-  - **Time supports.** {py:class}`~flow.TimeSampler` refuses a support whose extreme draws would round to 0 or 1 in
-    float32.
   - **Singular times.** {py:class}`~flow.FlowMatching` refuses, when the objective is built, a velocity-space loss
-    whose time support (`flow.time.support`) contains the prediction's singular time. Draws never land exactly on 0 or
-    1, but inside such a support they come arbitrarily close, where the conversion's gain is unbounded.
+    whose time support (`flow.time.support`) contains the prediction's singular time. Inside such a support draws come
+    arbitrarily close to it, where the conversion's gain is unbounded. A support end within $2^{-23}$ of the singular
+    time counts as containing it, since float32 draws can round onto that end.
     {py:meth}`~flow.Sampler.times` refuses a time grid that is not increasing in float32 or that would evaluate a
     prediction at its singular time.
 - **float32**: simulation, conversions and losses run in float32, also under bf16 autocast; network outputs are cast
-  to float32 before use. Time quantiles and grid coefficients are computed in float64.
+  to float32 before use. Training times are drawn in float32 and grid coefficients computed in float64.
 - **Non-finite samples raise.** {py:meth}`~flow.Sampler.sample` checks the final chunk (a non-finite value stays
   non-finite through later steps) and also raises if the number of network evaluations differs from
   {py:attr}`~flow.Sampler.nfe`.

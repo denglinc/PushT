@@ -18,7 +18,7 @@ $$
 The network sees $(x, t)$, with the guiding variable $y$ fixed, and outputs a velocity, the denoiser or the scaled
 score (a Prediction); samplers convert its output to the vector field and integrate. Nothing is clamped:
 denominators that vanish at an endpoint are kept away from it by rules checked when a training support or a time
-grid is built. Integration, adapters and losses run in float32 (time quantiles in float64).
+grid is built. Integration, adapters, losses and time draws run in float32.
 
 MeanFlow trains the average velocity over $[t, s]$ along a trajectory $X_\tau$ of the marginal ODE instead,
 $\bar u_{t,s}(X_t) = \frac{1}{s - t}\int_t^s u_\tau^{\text{target}}(X_\tau)\,\mathrm d\tau$, whose limit as
@@ -48,8 +48,9 @@ Tangent = Literal["conditional", "predicted"]
 Reduction = Literal["sum", "example_mean"]
 
 HALF_PI = 0.5 * math.pi
-# Open quantile lattice u = (2k + 1) 2^-24, k < 2^23: exactly uniform in float32 and symmetric about 1/2.
-QUANTILE_BITS = 23
+# A velocity-space loss must not train at its prediction's singular time. A float32 draw can round onto a support end
+# that lies within 2^-23 of that time, so such an end counts as reaching it.
+SINGULAR_MARGIN = 2.0**-23
 # A scaled-score prediction cannot be evaluated at t = 0 (its velocity divides by alpha); sampling starts here
 # from N(0, I), an approximation of p_t at this time, not its exact marginal. Near 0 the first step multiplies the
 # network's error by dt kappa / alpha (about 100 for 10 steps from 0.001), so the start stays clear of it: on Push-T
@@ -318,11 +319,13 @@ class GVPPath(ProbabilityPath):
 
 class TimeSampler(abc.ABC):
     r"""
-    A training distribution of flow times with CDF $F$, restricted to a support $[t_{\min}, t_{\max}]$ within $[0, 1]$.
-    Note: a draw is $t = F^{-1}\big(F(t_{\min}) + (F(t_{\max}) - F(t_{\min}))\,\nu\big)$ with $\nu$ on an open lattice
-    of quantiles, the closed form of drawing from $F$ and redrawing until $t$ lies in the support. Nothing is clamped
-    and nothing depends on tensor values, so it runs inside a CUDA graph. Whether float32 could round a draw to 0 or 1
-    depends only on the two extreme quantiles, so that is checked once, here.
+    A training distribution of flow times, given by its inverse CDF $F^{-1}$ on a support $[t_{\min}, t_{\max}]$
+    within $[0, 1]$.
+    Note: a draw is $t = F^{-1}(u)$ with one uniform $u \in [0, 1)$ per example. Every distribution therefore consumes
+    the same random numbers, so runs that differ only in it share a seed's noise and batch order, and their times are
+    coupled through $u$. Nothing is clamped and nothing depends on tensor values, so it runs inside a CUDA graph. $u$
+    can be exactly 0, so a draw can equal $t_{\min}$: no regression target divides by a path coefficient, and a
+    velocity-space loss is kept off its singular time by the support rule of FlowMatching.
     """
 
     def __init__(self, *, support: tuple[float, float]) -> None:
@@ -336,46 +339,16 @@ class TimeSampler(abc.ABC):
                 f"The time support must satisfy 0 <= a < b <= 1, got {support}."
             )
         self.support = (low, high)
-        self.mass = (self.cdf(low), self.cdf(high))
-        if not self.mass[1] > self.mass[0]:
-            raise ValueError(f"The time support {support} carries no probability.")
-        extremes = torch.tensor([2.0**-24, 1.0 - 2.0**-24], dtype=torch.float64)
-        first, last = self.icdf(self._restrict(extremes)).float().tolist()
-        if not (first > 0.0 and last < 1.0):
-            raise ValueError(
-                f"{type(self).__name__} on {support} reaches t = {first:g} .. {last:g}; float32 would round "
-                "draws to an endpoint."
-            )
 
     @abc.abstractmethod
-    def cdf(self, t: float) -> float:
-        """
-        Evaluates the CDF $F(t)$ on the host.
-        Args:
-            - t: a flow time in $[0, 1]$
-        Returns:
-            - $F(t)$, in float64
-        """
-
-    @abc.abstractmethod
-    def icdf(self, p: torch.Tensor) -> torch.Tensor:
-        """
-        Evaluates the inverse CDF $F^{-1}(p)$.
-        Args:
-            - p: probabilities, float64, any shape
-        Returns:
-            - flow times, float64, the same shape
-        """
-
-    def _restrict(self, u: torch.Tensor) -> torch.Tensor:
+    def icdf(self, u: torch.Tensor) -> torch.Tensor:
         r"""
-        Maps quantiles of the whole distribution to quantiles inside the support.
+        Evaluates the inverse CDF.
         Args:
-            - u: quantiles $\nu$ in $(0, 1)$, float64
+            - u: uniform draws in $[0, 1)$, 0 included, float32, any shape
         Returns:
-            - $F(t_{\min}) + (F(t_{\max}) - F(t_{\min}))\,\nu$
+            - flow times in $[t_{\min}, t_{\max}]$, float32, the same shape
         """
-        return self.mass[0] + (self.mass[1] - self.mass[0]) * u
 
     def sample(self, n: int, device: torch.device) -> torch.Tensor:
         """
@@ -386,9 +359,7 @@ class TimeSampler(abc.ABC):
         Returns:
             - $t$: flow times in float32, shape (n, 1)
         """
-        k = torch.randint(0, 2**QUANTILE_BITS, (n, 1), device=device)
-        u = (2 * k + 1).double() * 2.0 ** -(QUANTILE_BITS + 1)
-        return self.icdf(self._restrict(u)).float()
+        return self.icdf(torch.rand((n, 1), device=device))
 
 
 class UniformTime(TimeSampler):
@@ -396,23 +367,18 @@ class UniformTime(TimeSampler):
     $t \sim \mathrm{Unif}(t_{\min}, t_{\max})$.
     """
 
-    def cdf(self, t: float) -> float:
+    def icdf(self, u: torch.Tensor) -> torch.Tensor:
+        r"""
+        Evaluates $F^{-1}(u) = t_{\min} + (t_{\max} - t_{\min})\,u$.
         """
-        Evaluates $F(t) = t$.
-        """
-        return t
-
-    def icdf(self, p: torch.Tensor) -> torch.Tensor:
-        """
-        Evaluates $F^{-1}(p) = p$.
-        """
-        return p
+        low, high = self.support
+        return low + (high - low) * u
 
 
 class LogitNormalTime(TimeSampler):
     r"""
-    $\mathrm{logit}\,t \sim \mathcal N(\mu, \varsigma^2)$, restricted to the support; a positive mean puts
-    more times near the data.
+    $\mathrm{logit}\,t \sim \mathcal N(\mu, \varsigma^2)$ on the whole of $[0, 1]$; a positive mean puts more times near
+    the data.
     """
 
     def __init__(
@@ -422,27 +388,23 @@ class LogitNormalTime(TimeSampler):
         Args:
             - mean: mean of $\mathrm{logit}\,t$
             - std: standard deviation of $\mathrm{logit}\,t$, positive
-            - support: $(t_{\min}, t_{\max})$ with $0 \le t_{\min} < t_{\max} \le 1$
+            - support: $(0, 1)$ only; a uniform time takes a narrower support
         """
         if not std > 0:
             raise ValueError(f"std must be positive, got {std}.")
+        if tuple(float(s) for s in support) != (0.0, 1.0):
+            raise ValueError(
+                f"LogitNormalTime draws on the whole of [0, 1], got the support {support}; restrict a uniform time "
+                "instead."
+            )
         self.mean, self.std = float(mean), float(std)
         super().__init__(support=support)
 
-    def cdf(self, t: float) -> float:
+    def icdf(self, u: torch.Tensor) -> torch.Tensor:
         r"""
-        Evaluates $F(t) = \Phi\big((\mathrm{logit}\,t - \mu)/\varsigma\big)$.
+        Evaluates $F^{-1}(u) = \mathrm{sigmoid}\big(\mu + \varsigma\,\Phi^{-1}(u)\big)$; $u = 0$ gives $t = 0$.
         """
-        if t in (0.0, 1.0):
-            return t
-        y = (math.log(t) - math.log1p(-t) - self.mean) / self.std
-        return 0.5 * math.erfc(-y / math.sqrt(2.0))
-
-    def icdf(self, p: torch.Tensor) -> torch.Tensor:
-        r"""
-        Evaluates $F^{-1}(p) = \mathrm{sigmoid}\big(\mu + \varsigma\,\Phi^{-1}(p)\big)$.
-        """
-        return torch.sigmoid(self.mean + self.std * torch.special.ndtri(p))
+        return torch.sigmoid(self.mean + self.std * torch.special.ndtri(u))
 
 
 class Prediction(abc.ABC):
@@ -622,10 +584,10 @@ class FlowMatching:
         singular = self.prediction.singular_time
         if self.recipe.velocity_loss and singular is not None:
             low, high = time.support
-            if low <= singular <= high:
+            if low - SINGULAR_MARGIN <= singular <= high + SINGULAR_MARGIN:
                 raise ValueError(
-                    f"Recipe {recipe!r} divides by zero at t = {singular}; restrict the time support to exclude "
-                    "it (e.g. [0.001, 0.999])."
+                    f"Recipe {recipe!r} divides by zero at t = {singular}; draw the times uniformly on a support "
+                    "that excludes it (e.g. flow/time=uniform 'flow.time.support=[0.0,0.99]')."
                 )
 
     def per_example(self, error: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -808,8 +770,8 @@ class MeanFlow(FlowMatching):
         r"""
         Draws one time pair per example (see the class note).
         Note: the number of flow matching rows, $\mathrm{round}(\text{share}\cdot B)$ for a batch of $B = n$ pairs, is
-        fixed and the draws come from the quantile lattice, so this runs inside a CUDA graph; batches are shuffled, so
-        the rows by index are a fixed share of random examples.
+        fixed and the draws involve no control flow on tensor values, so this runs inside a CUDA graph; batches are
+        shuffled, so the rows by index are a fixed share of random examples.
         Args:
             - n: number of pairs
             - device: where to draw them

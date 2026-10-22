@@ -152,6 +152,15 @@ def test_unsupported_combinations_fail_before_training():
     with pytest.raises(InstantiationException):
         train.check_config(config("flow=meanflow", "flow.flow_matching_share=1.5"))
     train.check_config(config("model=mlp", "flow/path=gvp", "flow/time=logit_normal"))
+    # A logit-normal time draws on the whole of [0, 1], so it takes no narrower support and no velocity-space loss.
+    with pytest.raises(InstantiationException):
+        train.check_config(
+            config("flow/time=logit_normal", "flow.time.support=[0.0,0.99]")
+        )
+    with pytest.raises(InstantiationException):
+        train.check_config(
+            config("flow/time=logit_normal", "flow.recipe=data_output_velocity_loss")
+        )
     control = config(
         "experiment=meanflow",
         "flow=default",
@@ -465,15 +474,25 @@ def test_adamw_groups_share_one_learning_rate_tensor():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_compiled_loss_draws_like_eager():
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ("model.cond_dropout=0.1",),
+        ("model.cond_dropout=0.0",),
+        ("model.cond_dropout=0.0", "flow/time=logit_normal"),
+    ],
+    ids=["dropout", "no_dropout", "logit_normal"],
+)
+def test_compiled_loss_draws_like_eager(overrides):
     """
     The compiled loss (build_loss) draws the flow times, noise and condition dropout the eager one draws: from the
-    same generator state it gives the same loss, to rounding, and leaves the same state.
+    same generator state it gives the same loss, to rounding, and leaves the same state. Without dropout the dropout
+    uniforms are still drawn, so the compiled loss must keep that draw.
     Note: every weight is perturbed first, so that the zero-initialized output layers do not hide the network (and
     with it the dropout mask) from the loss.
     """
     torch.manual_seed(0)
-    model = build_policy(small("model.cond_dropout=0.1"), MODEL_KWARGS).cuda().train()
+    model = build_policy(small(*overrides), MODEL_KWARGS).cuda().train()
     with torch.no_grad():
         for p in model.parameters():
             p.add_(0.05 * torch.randn_like(p))
@@ -488,6 +507,26 @@ def test_compiled_loss_draws_like_eager():
     compiled_loss, _ = compiled(obs, goal, z, weight)
     assert torch.equal(torch.cuda.get_rng_state(), eager_state)
     torch.testing.assert_close(compiled_loss, eager_loss, rtol=1e-5, atol=0)
+
+
+def test_condition_dropout_draws_at_every_probability():
+    """
+    Training draws the dropout uniforms whatever cond_dropout is, so runs that differ only in it share a seed's flow
+    times, noise and batch order; at cond_dropout = 0 every example keeps its condition.
+    """
+    obs, goal = torch.randn(8, 2, 6), torch.randn(8, 4)
+    z, weight = torch.randn(8, 16, 2), torch.ones(8, 16)
+    states = []
+    for p in (0.0, 0.1):
+        torch.manual_seed(0)
+        model = build_policy(small(f"model.cond_dropout={p}"), MODEL_KWARGS).train()
+        torch.manual_seed(1)
+        model.compute_loss(obs, goal, z, weight)
+        states.append(torch.get_rng_state())
+    assert torch.equal(states[0], states[1])
+    torch.manual_seed(0)
+    model = build_policy(small("model.cond_dropout=0.0"), MODEL_KWARGS).train()
+    assert torch.equal(model.condition(obs, goal), model.encode_condition(obs, goal))
 
 
 def small(*overrides: str) -> DictConfig:

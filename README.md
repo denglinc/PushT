@@ -23,7 +23,7 @@ The first run downloads the training set (31 MB) to `data/`. The default trains 
 an RTX 5080 plus a few minutes of evaluation: every 10,000
 steps it plays 200 episodes and prints the success rate. The run lands in `runs/default/<time>_seed_0/`, with
 `log.csv` and `checkpoint.pt`. Its first step compiles the loss; `train.compile=false` trains eagerly (7.8 ms per
-step) and reproduces runs from before the compiled loss bit for bit.
+step). Runs from commit 07c0a0a or earlier drew their flow times differently and repeat bit for bit only with that code.
 
 Then score finished runs on 1,000 held-out episodes, under any sampler, without retraining:
 

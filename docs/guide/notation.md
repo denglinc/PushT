@@ -277,7 +277,7 @@ tables.
   $\kappa_t/\beta_t$ for a denoiser and $\kappa_t/\alpha_t$ for a scaled score ([Four
   parameterizations](flow/index.md#four-parameterizations)).
 - **Singular time.** The flow time at which an output's conversion divides by zero, $t = 1$ for a denoiser and $t = 0$
-  for a scaled score; the code never evaluates an output there ([Numerics](flow/index.md#numerics)).
+  for a scaled score; the code never converts an output there ([Numerics](flow/index.md#numerics)).
 - **Recipe.** An output paired with the space its loss compares in: `velocity_mse`, `data_mse`,
   `data_output_velocity_loss` or `scaled_score_mse` ([Recipes](flow/training.md#recipes)).
 - **Velocity loss, data loss.** The findings' names for `velocity_mse` and `data_mse`

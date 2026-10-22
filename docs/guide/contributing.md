@@ -28,9 +28,9 @@ with `ruff format`, which also formats the Python blocks of the Markdown pages; 
     time derivative of $x = \alpha_t z + \beta_t\epsilon$;
   - the conversions between predictions reproduce the analytic posterior quantities and commute with classifier-free
     guidance (`test_adapters_on_the_gaussian_posterior`);
-  - flow times lie on the quantile lattice, truncated draws follow the truncated CDF
-    (`test_truncated_draws_follow_the_conditional_cdf`), and distributions that would reach an endpoint in float32 are
-    refused;
+  - flow times follow their law (`test_draws_follow_the_law`), every sampler uses one uniform per example and stays
+    finite at the extreme uniforms, losses are finite where a draw can land on an end, and a logit-normal refuses a
+    narrower support;
   - an oracle has zero loss under every recipe and path, both reductions match a hand computation, and a
     velocity-space loss refuses a support with the singular time;
   - every solver, grid, path and prediction reaches the exact endpoint (`test_ode_reaches_the_exact_endpoint`), the

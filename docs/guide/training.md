@@ -35,8 +35,9 @@ marked failed and the error propagates.
 {py:func}`~train.run_training` first calls {py:func}`~train.check_config`, which needs neither data nor a GPU, so a bad
 combination fails before any data or GPU work. It instantiates the flow objective and the sampler, so their
 constructors' checks run there too. {py:func}`~train.set_seed` then seeds numpy, torch and every CUDA device: the seed
-fixes the initialization, the batch order, the flow times $t$, the noise $\epsilon$ and, with `model.cond_dropout` > 0,
-the condition-dropout draws, while evaluation draws from streams of its own (symbols as in {doc}`notation`).
+fixes the initialization, the batch order, the flow times $t$, the noise $\epsilon$ and the condition-dropout draws,
+while evaluation draws from streams of its own (symbols as in {doc}`notation`). The dropout draws are made at every
+`model.cond_dropout`, 0 included, so runs that differ only in it share every other draw of a seed.
 
 {py:func}`~data.download_pusht` and {py:func}`~data.load_pusht_zarr` read the demonstrations, and
 {py:class}`~data.PushtChunkDataset` builds every window once, on the device: K history frames and the goal, all
@@ -89,7 +90,8 @@ draws of torch's generator. On the CPU, or with `train.cuda_graph=false`, every 
 than the fused kernels at a chunk of 16 tokens. `fallback_random` keeps torch's own random draws, so the compiled loss
 draws the flow times, noise and dropout mask that the eager one draws, and every kernel keeps Inductor's first config,
 so a seed repeats bit for bit whatever the compile cache holds. The compiled and eager losses agree to rounding, not bit
-for bit: `train.compile=false` reproduces runs from before the compiled loss bit for bit. The first step compiles; the
+for bit. Runs from commit 07c0a0a or earlier, before the flow times were drawn from `torch.rand` and the dropout draw
+was made at every `model.cond_dropout`, repeat bit for bit only with that code. The first step compiles; the
 compiled loss is then captured with the rest of the step. Only the loss is compiled, and the optimizers run eagerly
 inside the graph: compiling torch 2.9.1's Muon step silently broke training. Each run resets Dynamo, because the jobs of
 a `-m` sweep share one process and would otherwise reach Dynamo's recompile limit.

@@ -251,13 +251,15 @@ time density spends network capacity where the training error matters. The two a
 must stay where the network was trained ([Endpoints](#endpoints)).
 
 Two distributions ship, as `conf/flow/time/uniform.yaml` (the default, the notes' choice) and
-`conf/flow/time/logit_normal.yaml`. Each is given by its CDF $F$:
+`conf/flow/time/logit_normal.yaml`. Each is given by its inverse CDF $F^{-1}$, applied to one uniform draw per example
+([Drawing on a support](#drawing-on-a-support)):
 
-- {py:class}`~flow.UniformTime`: $F(t) = t$.
--  {py:class}`~flow.LogitNormalTime`: $\mathrm{logit}\,t \sim \mathcal N(\mu, \varsigma^2)$ with mean $\mu$
-  (`flow.time.mean`) and standard deviation $\varsigma$ (`flow.time.std`). With $\Phi$ the standard normal CDF,
-  $F(t) = \Phi\big((\mathrm{logit}\,t - \mu)/\varsigma\big)$ and
-  $F^{-1}(\nu) = \mathrm{sigmoid}\big(\mu + \varsigma\,\Phi^{-1}(\nu)\big)$. A positive mean $\mu$ puts more times near
+- {py:class}`~flow.UniformTime`: $F^{-1}(u) = t_{\min} + (t_{\max} - t_{\min})\,u$ on the support
+  $[t_{\min}, t_{\max}]$ (`flow.time.support`).
+-  {py:class}`~flow.LogitNormalTime`: $\mathrm{logit}\,t \sim \mathcal N(\mu, \varsigma^2)$ on all of $[0, 1]$, with
+  mean $\mu$ (`flow.time.mean`) and standard deviation $\varsigma$ (`flow.time.std`). With $\Phi$ the standard normal
+  CDF, $F(t) = \Phi\big((\mathrm{logit}\,t - \mu)/\varsigma\big)$ and
+  $F^{-1}(u) = \mathrm{sigmoid}\big(\mu + \varsigma\,\Phi^{-1}(u)\big)$. A positive mean $\mu$ puts more times near
   the data, a negative one near the noise. Its default, $(\mu, \varsigma) = (0, 1)$, is Stable Diffusion 3's choice.
   Stable Diffusion 3 runs time the other way, with the noise at $t = 1$. Since
   $\mathrm{logit}(1 - t) = -\mathrm{logit}\,t$, its logit-normal with mean $\mu_{\text{SD3}}$ is ours with
@@ -278,72 +280,57 @@ Reproduce: `uv run train.py -m experiment=flow_matching flow/path=linear flow.re
 
 ### Drawing on a support
 
-How does the code draw from a distribution restricted to an interval, at a fixed cost? A
-{py:class}`~flow.TimeSampler` is a distribution with an increasing CDF $F$, restricted to a support
-$[t_{\min}, t_{\max}] \subseteq [0, 1]$ (`flow.time.support`). Its density $p_{\mathrm{time}}$ is
-$F'/\big(F(t_{\max}) - F(t_{\min})\big)$ on the support and $0$ outside. The draw inverts the CDF on quantiles
-restricted to the support.
+How does the code draw a flow time at a fixed cost, inside a captured training step? A
+{py:class}`~flow.TimeSampler` is a distribution on a support $[t_{\min}, t_{\max}] \subseteq [0, 1]$
+(`flow.time.support`), given by its inverse CDF $F^{-1}$. Each example gets one uniform $u \in [0, 1)$ from
+`torch.rand`, and its time is $t = F^{-1}(u)$.
 
-:::{admonition} Proposition: the inverse CDF on restricted quantiles
+:::{admonition} Proposition: inverse-transform sampling
 :class: important
 
-Let $F$ be continuous and strictly increasing, and let $U$ be uniform on $(0, 1)$. The draw
+Let $F$ be a continuous, increasing CDF and let $U$ be uniform on $[0, 1)$. Then $t = F^{-1}(U)$ has the CDF $F$:
 
 $$
-t = F^{-1}\Big(F(t_{\min}) + \big(F(t_{\max}) - F(t_{\min})\big)\,U\Big)
+P(t \le r) = F(r).
 $$
-
-has, for every $r \in [t_{\min}, t_{\max}]$, the CDF
-
-$$
-P(t \le r) = \frac{F(r) - F(t_{\min})}{F(t_{\max}) - F(t_{\min})},
-$$
-
-which is $F$ conditioned on the support.
 :::
 
 The derivation takes two steps:
 
 $$
-P(t \le r)
-\overset{(i)}{=} P\Big(F(t_{\min}) + \big(F(t_{\max}) - F(t_{\min})\big)\,U \le F(r)\Big)
-\overset{(ii)}{=} \frac{F(r) - F(t_{\min})}{F(t_{\max}) - F(t_{\min})},
+P(t \le r) \overset{(i)}{=} P\big(U \le F(r)\big) \overset{(ii)}{=} F(r),
 $$
 
-where (i) applies the increasing $F$ to both sides of $t \le r$, and (ii) uses that $U$ is uniform on $(0, 1)$. In
-other words, one draw gives the law of drawing from $F$ and redrawing until $t$ lands in the support. For the uniform
-$F(t) = t$ it is the uniform law on $[t_{\min}, t_{\max}]$. Three ways to draw on a support compare on two axes, the
+where (i) applies the increasing $F$ to both sides of $F^{-1}(U) \le r$, and (ii) uses that $U$ is uniform. For the
+uniform law on the support, $F^{-1}(u) = t_{\min} + (t_{\max} - t_{\min})\,u$ scales the draw into the support. For any
+other $F$, restricting the law to a narrower support is a separate question, and three ways to do it compare on the
 law of the draw and its cost:
 
-| way to draw | law of the draw | cost |
+| way to restrict to $[t_{\min}, t_{\max}]$ | law of the draw | cost |
 | --- | --- | --- |
 | redraw until $t$ lands in the support | $F$ conditioned on the support | a loop whose length depends on the draws |
 | clamp $t$ to the support | wrong: atoms at $t_{\min}$ and $t_{\max}$ | fixed |
-| invert the CDF on restricted quantiles | $F$ conditioned on the support | fixed, one draw |
+| scale the draw into the support | right for the uniform law only; another law for any other $F$ | fixed |
 
-Only the last has both the right law and a fixed cost, which a training step captured as a CUDA graph needs.
-{py:meth}`~flow.TimeSampler.sample` replaces $U$ by an open lattice of quantiles,
+Only scaling a uniform has both the right law and a fixed cost, which a training step captured as a CUDA graph needs.
+Clamping is not harmless. `data_output_velocity_loss` weights the denoising error by $(1 - t)^{-2}$ on the linear path
+([Endpoints](#endpoints)): on $[0, 0.99]$ the uniform law gives it an average weight of 100, while clamping uniform
+draws from $[0, 1]$ to $0.99$ adds an atom of mass $0.01$ at weight $10^4$ and about doubles it, to 199. So the uniform
+time takes any support, and {py:class}`~flow.LogitNormalTime` draws on all of $[0, 1]$ and refuses a narrower one.
+The one recipe that needs a narrower support, `data_output_velocity_loss`, therefore draws uniform times. Two more
+properties of the draw matter.
 
-$$
-\nu_i = (2i + 1)\,2^{-24}, \quad i \in \{0, \dots, 2^{23} - 1\} \text{ uniform}, \qquad
-t = F^{-1}\Big(F(t_{\min}) + \big(F(t_{\max}) - F(t_{\min})\big)\,\nu_i\Big).
-$$
-
-The lattice is a 23-bit version of $U$, uniform on the midpoints of $2^{23}$ equal cells of $(0, 1)$. Its CDF is within
-$2^{-24}$ of the CDF of $U$. The CDF of the draw is therefore within $2^{-24}$ of the truncated $F$, before $t$ is
-rounded to float32. Two more properties of the lattice matter.
-
-- **It is open.** No $\nu_i$ equals 0 or 1, so the restricted quantiles stay strictly inside
-  $\big(F(t_{\min}), F(t_{\max})\big)$. On the support $[0, 1]$, $\Phi^{-1}$ of them stays finite, and a logit-normal
-  draw never lands on an endpoint.
-- **It is symmetric about 1/2.** $\nu$ and $1 - \nu$ are equally likely. On a support symmetric about 1/2, such as
-  the default $[0, 1]$, an $F$ symmetric about 1/2 therefore gives draws symmetric about 1/2. The uniform and the
-  logit-normal with $\mu = 0$ are such $F$.
-
-The quantiles are computed in float64 and the times returned in float32. Since $F^{-1}$ is increasing, only the two
-extreme quantiles can round to an endpoint. The constructor evaluates them once and refuses a support whose extreme
-draws would round to 0 or 1 in float32 ([Numerics](index.md#numerics)). The training draws therefore never reach
-$t = 0$ or $t = 1$.
+- **It can land on an end.** `torch.rand` returns exactly 0 with probability $2^{-24}$ per draw on the CPU and
+  $2^{-25}$ on CUDA, and never 1, so a draw can equal $t_{\min}$, and a logit-normal can give $t = 0$. A logit-normal
+  wide enough to put $\mu + 5.3\,\varsigma$ above about 16.6 can also round to $t = 1$ in float32. This is harmless:
+  no target in the output's own space divides by a path coefficient ([Endpoints](#endpoints)), and
+  {py:class}`~flow.FlowMatching` keeps the velocity-space loss off its singular time by a rule on the support
+  ([Numerics](index.md#numerics)). Nothing is clamped.
+- **Every distribution uses the same random numbers.** Each sampler draws exactly one `torch.rand` per example, so
+  runs that differ only in the time law share a seed's noise and batch order, and their times are coupled through $u$:
+  at the same seed, a uniform run sees $t = u$ where a logit-normal run sees $F^{-1}(u)$. This is why the
+  logit-normal applies $\Phi^{-1}$ to the uniform draw instead of drawing a separate normal. The draws run in
+  float32.
 
 ## Recipes
 
@@ -393,8 +380,9 @@ u_t^\theta(x \mid y) - u_t^{\text{target}}(x \mid z)
 $$
 
 where (i) writes both fields through the same affine map, the network's by conversion and the target's by that
-proposition, and (ii) cancels the $x$ terms. Squaring and dividing by $B_t^2 > 0$ gives the proposition. The draws never
-reach $t = 0$ or $t = 1$ ([Drawing on a support](#drawing-on-a-support)), so the identity covers every training sample.
+proposition, and (ii) cancels the $x$ terms. Squaring and dividing by $B_t^2 > 0$ gives the proposition. A draw lands exactly
+on $t = 0$ or $t = 1$ with probability of order $2^{-24}$ ([Drawing on a support](#drawing-on-a-support)), so the
+identity covers almost every training sample.
 
 In other words, a loss in the output's own space forgives a velocity error wherever the conversion's gain $B_t$ is
 large. We call $\lambda_t$ the recipe's **time weight**. It is not the Diffusion Guide's $\lambda_t$, which is half the
